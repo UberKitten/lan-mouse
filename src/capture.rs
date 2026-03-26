@@ -1,7 +1,6 @@
 use std::{
     cell::RefCell,
     rc::Rc,
-    time::Duration,
 };
 
 use futures::StreamExt;
@@ -336,28 +335,9 @@ impl CaptureTask {
             },
         };
 
-        if let Err(e) = self.conn.send(event.clone(), handle).await {
-            // First send failed (likely NotConnected, which triggers a background
-            // reconnect). Wait briefly and retry a few times before releasing capture,
-            // so the user doesn't have to cross the boundary twice.
-            let mut connected = false;
-            for attempt in 1..=6 {
-                tokio::time::sleep(Duration::from_secs(1)).await;
-                match self.conn.send(event.clone(), handle).await {
-                    Ok(_) => {
-                        log::info!("reconnected after {attempt}s, resuming capture");
-                        connected = true;
-                        break;
-                    }
-                    Err(_) => {
-                        log::debug!("reconnect retry {attempt}/6 ...");
-                    }
-                }
-            }
-            if !connected {
-                log::warn!("releasing capture: {e}");
-                capture.release().await?;
-            }
+        if let Err(e) = self.conn.send(event, handle).await {
+            log::warn!("releasing capture: {e}");
+            capture.release().await?;
         }
         Ok(())
     }
