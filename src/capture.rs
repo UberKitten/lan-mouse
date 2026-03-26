@@ -1,6 +1,7 @@
 use std::{
-    cell::RefCell,
+    cell::{Cell, RefCell},
     rc::Rc,
+    time::{Duration, Instant},
 };
 
 use futures::StreamExt;
@@ -348,7 +349,17 @@ impl CaptureTask {
         };
 
         if let Err(e) = self.conn.send(event, handle).await {
-            log::warn!("releasing capture: {e}");
+            // Debounce: only log once per second to avoid spamming
+            thread_local! {
+                static LAST_LOG: Cell<Option<Instant>> = const { Cell::new(None) };
+            }
+            LAST_LOG.with(|last| {
+                let should_log = last.get().is_none_or(|t| t.elapsed() > Duration::from_secs(1));
+                if should_log {
+                    log::warn!("releasing capture: {e}");
+                    last.set(Some(Instant::now()));
+                }
+            });
             capture.release().await?;
         }
         Ok(())
