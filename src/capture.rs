@@ -1,7 +1,7 @@
 use std::{
-    cell::{Cell, RefCell},
+    cell::RefCell,
     rc::Rc,
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 use futures::StreamExt;
@@ -131,23 +131,6 @@ impl Capture {
     pub(crate) async fn event(&mut self) -> ICaptureEvent {
         self.event_rx.recv().await.expect("channel closed")
     }
-}
-
-/// debounce a statement `$st`, i.e. the statement is executed only if the
-/// time since the previous execution is at least `$dur`.
-/// `$prev` is used to keep track of this timestamp
-macro_rules! debounce {
-    ($prev:ident, $dur:expr, $st:stmt) => {
-        let exec = match $prev.get() {
-            None => true,
-            Some(instant) if instant.elapsed() > $dur => true,
-            _ => false,
-        };
-        if exec {
-            $prev.replace(Some(Instant::now()));
-            $st
-        }
-    };
 }
 
 struct CaptureTask {
@@ -353,10 +336,28 @@ impl CaptureTask {
             },
         };
 
-        if let Err(e) = self.conn.send(event, handle).await {
-            const DUR: Duration = Duration::from_millis(500);
-            debounce!(PREV_LOG, DUR, log::warn!("releasing capture: {e}"));
-            capture.release().await?;
+        if let Err(e) = self.conn.send(event.clone(), handle).await {
+            // First send failed (likely NotConnected, which triggers a background
+            // reconnect). Wait briefly and retry a few times before releasing capture,
+            // so the user doesn't have to cross the boundary twice.
+            let mut connected = false;
+            for attempt in 1..=6 {
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                match self.conn.send(event.clone(), handle).await {
+                    Ok(_) => {
+                        log::info!("reconnected after {attempt}s, resuming capture");
+                        connected = true;
+                        break;
+                    }
+                    Err(_) => {
+                        log::debug!("reconnect retry {attempt}/6 ...");
+                    }
+                }
+            }
+            if !connected {
+                log::warn!("releasing capture: {e}");
+                capture.release().await?;
+            }
         }
         Ok(())
     }
@@ -371,10 +372,6 @@ impl CaptureTask {
         }
         capture.release().await
     }
-}
-
-thread_local! {
-    static PREV_LOG: Cell<Option<Instant>> = const { Cell::new(None) };
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]

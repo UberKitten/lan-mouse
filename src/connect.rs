@@ -166,6 +166,15 @@ impl LanMouseConnection {
     }
 }
 
+/// Maximum number of connection retry attempts before giving up
+const MAX_CONNECT_RETRIES: u32 = 10;
+
+/// Initial retry delay (doubles each attempt, capped at 5s)
+const INITIAL_RETRY_DELAY: Duration = Duration::from_millis(500);
+
+/// Maximum retry delay
+const MAX_RETRY_DELAY: Duration = Duration::from_secs(5);
+
 async fn connect_to_handle(
     client_manager: ClientManager,
     cert: Certificate,
@@ -183,34 +192,51 @@ async fn connect_to_handle(
             .into_iter()
             .map(|a| SocketAddr::new(a, port))
             .collect::<Vec<_>>();
-        log::info!("client ({handle}) connecting ... (ips: {addrs:?})");
-        let res = connect_any(&addrs, cert).await;
-        let (conn, addr) = match res {
-            Ok(c) => c,
-            Err(e) => {
-                connecting.lock().await.remove(&handle);
-                return Err(e);
+
+        let mut retry_delay = INITIAL_RETRY_DELAY;
+        for attempt in 0..MAX_CONNECT_RETRIES {
+            if attempt > 0 {
+                log::info!(
+                    "client ({handle}) retry {attempt}/{MAX_CONNECT_RETRIES} in {retry_delay:?}"
+                );
+                tokio::time::sleep(retry_delay).await;
+                retry_delay = (retry_delay * 2).min(MAX_RETRY_DELAY);
             }
-        };
-        log::info!("client ({handle}) connected @ {addr}");
-        client_manager.set_active_addr(handle, Some(addr));
-        conns.lock().await.insert(addr, conn.clone());
+
+            log::info!("client ({handle}) connecting ... (ips: {addrs:?})");
+            match connect_any(&addrs, cert.clone()).await {
+                Ok((conn, addr)) => {
+                    log::info!("client ({handle}) connected @ {addr}");
+                    client_manager.set_active_addr(handle, Some(addr));
+                    conns.lock().await.insert(addr, conn.clone());
+                    connecting.lock().await.remove(&handle);
+
+                    // poll connection for active
+                    spawn_local(ping_pong(addr, conn.clone(), ping_response.clone()));
+
+                    // receiver
+                    spawn_local(receive_loop(
+                        client_manager,
+                        handle,
+                        addr,
+                        conn,
+                        conns,
+                        tx,
+                        ping_response.clone(),
+                    ));
+                    return Ok(());
+                }
+                Err(e) => {
+                    log::warn!("client ({handle}) connection attempt failed: {e}");
+                }
+            }
+        }
+
+        log::warn!(
+            "client ({handle}) failed to connect after {MAX_CONNECT_RETRIES} attempts, giving up"
+        );
         connecting.lock().await.remove(&handle);
-
-        // poll connection for active
-        spawn_local(ping_pong(addr, conn.clone(), ping_response.clone()));
-
-        // receiver
-        spawn_local(receive_loop(
-            client_manager,
-            handle,
-            addr,
-            conn,
-            conns,
-            tx,
-            ping_response.clone(),
-        ));
-        return Ok(());
+        return Err(LanMouseConnectionError::NotConnected);
     }
     connecting.lock().await.remove(&handle);
     Err(LanMouseConnectionError::NotConnected)
