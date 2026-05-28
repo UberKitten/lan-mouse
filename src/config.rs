@@ -60,7 +60,7 @@ struct ConfigToml {
     input_post_processing: Option<InputConfig>,
 }
 
-#[derive(Clone, Serialize, Deserialize, Debug)]
+#[derive(Clone, Serialize, Deserialize, Debug, PartialEq)]
 struct InputConfig {
     // TODO: implement scroll_sensitivity and mouse_acceleration
     invert_scroll: Option<bool>,
